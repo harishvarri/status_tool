@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { Severity } from '@/types';
+import type { Severity } from '../../types';
 
 export interface CollectedError {
   type: 'console' | 'js_runtime' | 'network' | 'page_crash';

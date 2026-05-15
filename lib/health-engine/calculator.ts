@@ -1,4 +1,4 @@
-import type { ProjectStatus } from '@/types';
+import type { ProjectStatus } from '../../types';
 import type { HealthCalculationInput, HealthCalculationResult } from './types';
 
 const SEVERITY_WEIGHTS: Record<string, number> = {

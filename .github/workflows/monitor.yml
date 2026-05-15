@@ -31,13 +31,24 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium --with-deps
 
+      - name: Verify environment
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ]; then echo "Missing SUPABASE_URL secret"; exit 1; fi
+          if [ -z "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]; then echo "Missing SUPABASE_ANON_KEY secret"; exit 1; fi
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"; exit 1; fi
+          echo "All secrets present"
+
       - name: Run monitoring
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TARGET_PROJECT_ID: ${{ github.event.inputs.project_id }}
-        run: npx ts-node --project tsconfig.runner.json -r tsconfig-paths/register scripts/run-monitor.ts
+        run: npx --no-install ts-node --project tsconfig.runner.json scripts/run-monitor.ts
 
       - name: Upload failure screenshots (artifact fallback)
         if: failure()

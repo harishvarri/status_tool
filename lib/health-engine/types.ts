@@ -1,4 +1,4 @@
-import type { Severity, ProjectStatus } from '@/types';
+import type { Severity, ProjectStatus } from '../../types';
 
 export interface TestRunSummary {
   total: number;

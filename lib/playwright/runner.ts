@@ -1,9 +1,9 @@
 import { chromium } from '@playwright/test';
 import { attachErrorCollectors, type CollectedError } from './error-collector';
 import { captureAndStore } from './screenshot';
-import { calculateHealthScore } from '@/lib/health-engine/calculator';
-import type { MonitoringTest, TestStep, TestResult, Severity } from '@/types';
-import type { HealthCalculationResult } from '@/lib/health-engine/types';
+import { calculateHealthScore } from '../health-engine/calculator';
+import type { MonitoringTest, TestStep, TestResult, Severity } from '../../types';
+import type { HealthCalculationResult } from '../health-engine/types';
 
 export interface RunnerOptions {
   projectId: string;
