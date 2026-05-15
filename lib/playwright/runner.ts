@@ -13,7 +13,7 @@ export interface RunnerOptions {
   timeout?: number;
   /** Max tests running concurrently (default 4) */
   concurrency?: number;
-  /** Hard cap on per-test wall-clock time (default 60s) */
+  /** Hard cap on per-test wall-clock time (default 90s) */
   testTimeout?: number;
 }
 
@@ -31,7 +31,7 @@ export async function runMonitoringCycle(options: RunnerOptions): Promise<Runner
     tests,
     timeout = 15000,
     concurrency = 4,
-    testTimeout = 60000,
+    testTimeout = 90000,
   } = options;
 
   const browser = await chromium.launch({
@@ -43,10 +43,8 @@ export async function runMonitoringCycle(options: RunnerOptions): Promise<Runner
 
   try {
     if (tests.length === 0) {
-      // No tests defined — just ping the project URL
       await pingUrl(browser, projectId, projectUrl, timeout, results, allErrors);
     } else {
-      // Worker pool: run up to `concurrency` tests in parallel
       const queue = [...tests];
       const workers: Promise<void>[] = [];
       const limit = Math.min(concurrency, tests.length);
@@ -93,6 +91,25 @@ export async function runMonitoringCycle(options: RunnerOptions): Promise<Runner
   return { projectId, results, runtimeErrors: allErrors, health };
 }
 
+function describeStep(step: TestStep): string {
+  switch (step.action) {
+    case 'navigate':
+      return `navigate → ${step.url}`;
+    case 'click':
+      return `click "${step.selector}"`;
+    case 'fill':
+      return `fill "${step.selector}" with "${step.value}"`;
+    case 'wait':
+      return `wait for "${step.selector}"`;
+    case 'assert':
+      return `assert visible "${step.selector}"`;
+    case 'screenshot':
+      return 'screenshot';
+    default:
+      return JSON.stringify(step);
+  }
+}
+
 async function runSingleTest(
   browser: Browser,
   projectId: string,
@@ -115,42 +132,72 @@ async function runSingleTest(
   let testStatus: 'passed' | 'failed' | 'error' = 'passed';
   let errorMessage: string | null = null;
   let screenshotUrl: string | null = null;
+  let failedStepIndex = -1;
+  let failedStepDescription = '';
+  let failureUrl = '';
 
-  // Wrap entire test execution in a hard deadline so a single hung test
-  // can't block the worker pool indefinitely.
   const testDeadline = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`Test exceeded ${testTimeout}ms`)), testTimeout)
+    setTimeout(() => reject(new Error(`__TEST_TIMEOUT__:${testTimeout}ms`)), testTimeout)
   );
 
   try {
     await Promise.race([
       (async () => {
-        for (const step of test.steps as TestStep[]) {
-          await executeStep(page, step, stepTimeout);
+        const steps = test.steps as TestStep[];
+        for (let i = 0; i < steps.length; i++) {
+          failedStepIndex = i; // tracked so we know which step failed
+          failedStepDescription = describeStep(steps[i]);
+          await executeStep(page, steps[i], stepTimeout);
         }
+        failedStepIndex = -1; // all steps passed
       })(),
       testDeadline,
     ]);
   } catch (err: unknown) {
     testStatus = 'failed';
-    errorMessage = err instanceof Error ? err.message : String(err);
+    failureUrl = page.url();
+    const rawMsg = err instanceof Error ? err.message : String(err);
+
+    // Take screenshot of the actual failure state with unique filename
     try {
-      screenshotUrl = await captureAndStore(page, projectId);
+      screenshotUrl = await captureAndStore(
+        page,
+        projectId,
+        undefined,
+        sanitizeForFilename(`${test.test_name}_step${failedStepIndex + 1}`)
+      );
     } catch {
-      // Screenshot capture failure shouldn't crash the test
+      // Screenshot failures should not crash the test
+    }
+
+    if (rawMsg.startsWith('__TEST_TIMEOUT__')) {
+      errorMessage = `Test exceeded ${testTimeout}ms hard limit while on step ${failedStepIndex + 1}: ${failedStepDescription} | Page: ${failureUrl}`;
+    } else {
+      // Shorten Playwright's verbose error messages
+      const cleanMsg = shortenPlaywrightError(rawMsg);
+      errorMessage = `Step ${failedStepIndex + 1} (${failedStepDescription}) failed: ${cleanMsg} | Page: ${failureUrl}`;
     }
   }
 
   const duration = Date.now() - startTime;
 
-  // Downgrade to failed if critical JS errors were collected
+  // Downgrade if critical JS errors collected during the test
   const criticalErrors = testErrors.filter((e) => e.severity === 'critical');
   if (criticalErrors.length > 0 && testStatus === 'passed') {
     testStatus = 'failed';
-    errorMessage = criticalErrors.map((e) => e.message).join('; ');
+    errorMessage = `Critical JS errors detected: ${criticalErrors
+      .slice(0, 3)
+      .map((e) => e.message)
+      .join('; ')}`;
+    failureUrl = page.url();
     if (!screenshotUrl) {
       try {
-        screenshotUrl = await captureAndStore(page, projectId);
+        screenshotUrl = await captureAndStore(
+          page,
+          projectId,
+          undefined,
+          sanitizeForFilename(`${test.test_name}_jserror`)
+        );
       } catch {}
     }
   }
@@ -170,6 +217,18 @@ async function runSingleTest(
   };
 }
 
+function shortenPlaywrightError(msg: string): string {
+  // Playwright errors are very verbose — extract the essential part
+  const firstLine = msg.split('\n')[0].trim();
+  // Strip Playwright's "Call log:" tail
+  const beforeCallLog = firstLine.split('Call log:')[0].trim();
+  return beforeCallLog.slice(0, 200);
+}
+
+function sanitizeForFilename(s: string): string {
+  return s.replace(/[^a-z0-9_-]/gi, '_').slice(0, 60);
+}
+
 async function pingUrl(
   browser: Browser,
   projectId: string,
@@ -184,7 +243,7 @@ async function pingUrl(
   attachErrorCollectors(page, pageErrors);
 
   try {
-    await page.goto(projectUrl, { waitUntil: 'networkidle', timeout });
+    await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout });
     results.push({
       test_id: 'default',
       project_id: projectId,
@@ -194,12 +253,12 @@ async function pingUrl(
       screenshot_url: null,
       duration_ms: 0,
     });
-  } catch {
+  } catch (err) {
     results.push({
       test_id: 'default',
       project_id: projectId,
       status: 'failed',
-      error_message: 'Could not load application URL',
+      error_message: `Could not load application URL: ${err instanceof Error ? err.message : String(err)}`,
       screenshot_url: await captureAndStore(page, projectId).catch(() => null),
       duration_ms: 0,
     });

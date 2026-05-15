@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { createClient } from '@supabase/supabase-js';
+import { randomBytes } from 'crypto';
 
 function getServiceClient() {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -15,11 +16,15 @@ function getServiceClient() {
 export async function captureAndStore(
   page: Page,
   projectId: string,
-  testResultId?: string
+  testResultId?: string,
+  label?: string
 ): Promise<string | null> {
   try {
     const buffer = await page.screenshot({ fullPage: true, type: 'png' });
-    const filename = `${projectId}/${Date.now()}.png`;
+    // Guarantee uniqueness even in parallel runs within the same millisecond
+    const suffix = randomBytes(4).toString('hex');
+    const labelPart = label ? `_${label}` : '';
+    const filename = `${projectId}/${Date.now()}_${suffix}${labelPart}.png`;
     const supabase = getServiceClient();
 
     const { error: uploadError } = await supabase.storage
