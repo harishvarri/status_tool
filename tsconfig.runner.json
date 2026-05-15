@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "noEmit": false,
+    "outDir": ".runner-out",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "lib/**/*.ts",
+    "types/**/*.ts",
+    "services/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "app",
+    "components"
+  ]
+}
