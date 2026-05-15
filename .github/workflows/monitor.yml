@@ -37,7 +37,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TARGET_PROJECT_ID: ${{ github.event.inputs.project_id }}
-        run: npx ts-node --project tsconfig.runner.json scripts/run-monitor.ts
+        run: npx ts-node --project tsconfig.runner.json -r tsconfig-paths/register scripts/run-monitor.ts
 
       - name: Upload failure screenshots (artifact fallback)
         if: failure()
