@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   FolderKanban,
   AlertTriangle,
+  BarChart3,
   Settings,
   Zap,
 } from 'lucide-react';
@@ -15,6 +16,7 @@ import {
 const navItems = [
   { href: '/dashboard', label: 'Overview', icon: LayoutDashboard },
   { href: '/projects', label: 'Projects', icon: FolderKanban },
+  { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/errors', label: 'Errors', icon: AlertTriangle },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

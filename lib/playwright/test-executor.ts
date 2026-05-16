@@ -111,10 +111,13 @@ export async function executeTest(
       result: {
         test_id: test.id,
         project_id: projectId,
+        feature_id: test.feature_id ?? null,
         status: 'error',
         error_message: errorMessage,
         screenshot_url: null,
         duration_ms: Date.now() - startTime,
+        http_status_code: null,
+        response_size_bytes: null,
       },
       errors: allErrors,
     };
@@ -291,9 +294,12 @@ async function attemptTest(
   return {
     test_id: test.id,
     project_id: projectId,
+    feature_id: test.feature_id ?? null,
     status: testStatus,
     error_message: errorMessage,
     screenshot_url: screenshotUrl,
+    http_status_code: null,
+    response_size_bytes: null,
     duration_ms: 0, // filled in by caller
   };
 }

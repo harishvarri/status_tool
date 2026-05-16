@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
-import { runMonitoringCycle } from '../lib/playwright/runner';
+import { runChecks } from '../lib/checks/runner';
+import type { Feature, MonitoringTest } from '../types';
 
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error('SUPABASE_SERVICE_ROLE_KEY is required');
@@ -36,86 +37,103 @@ async function main() {
   console.log(`Running monitoring for ${projects.length} project(s)`);
 
   for (const project of projects) {
-    const { data: tests, error: testsError } = await supabase
-      .from('monitoring_tests')
-      .select('*')
-      .eq('project_id', project.id);
+    const [{ data: tests }, { data: features }] = await Promise.all([
+      supabase.from('monitoring_tests').select('*').eq('project_id', project.id),
+      supabase.from('features').select('*').eq('project_id', project.id),
+    ]);
 
-    if (testsError) {
-      console.error(`Failed to fetch tests for ${project.project_name}:`, testsError.message);
-      continue;
-    }
+    const projectTests: MonitoringTest[] = (tests ?? []) as MonitoringTest[];
+    const projectFeatures: Feature[] = (features ?? []) as Feature[];
 
     console.log(
-      `[${project.project_name}] Running ${tests?.length ?? 0} test(s) against ${project.project_url}`
+      `[${project.project_name}] Features: ${projectFeatures.length} | Tests: ${projectTests.length} → against ${project.project_url}`
     );
 
     try {
-      const runResult = await runMonitoringCycle({
+      const cycle = await runChecks({
         projectId: project.id,
         projectUrl: project.project_url,
-        tests: tests ?? [],
+        features: projectFeatures,
+        tests: projectTests,
       });
 
-      // Persist test results
-      if (runResult.results.length > 0) {
-        const { error: resultError } = await supabase
-          .from('test_results')
-          .insert(runResult.results);
-        if (resultError) console.error('Failed to save test results:', resultError.message);
+      // 1. Persist test results
+      if (cycle.results.length > 0) {
+        const { error } = await supabase.from('test_results').insert(cycle.results);
+        if (error) console.error('Failed to save test_results:', error.message);
       }
 
-      // Persist runtime errors
-      const errorInserts = runResult.runtimeErrors.map((e) => ({
-        project_id: project.id,
-        error_message: e.message,
-        page_url: e.url,
-        functionality: 'automated-check',
-        severity: e.severity,
-      }));
-      if (errorInserts.length > 0) {
-        const { error: errError } = await supabase
-          .from('runtime_errors')
-          .insert(errorInserts);
-        if (errError) console.error('Failed to save runtime errors:', errError.message);
+      // 2. Persist runtime errors
+      if (cycle.errors.length > 0) {
+        const errorInserts = cycle.errors.map((e) => ({
+          project_id: e.project_id,
+          feature_id: e.feature_id,
+          error_message: e.error_message,
+          page_url: e.page_url,
+          functionality: e.functionality,
+          severity: e.severity,
+          category: e.category,
+          screenshot_url: e.screenshot_url ?? null,
+        }));
+        const { error } = await supabase.from('runtime_errors').insert(errorInserts);
+        if (error) console.error('Failed to save runtime_errors:', error.message);
       }
 
-      // Save health log
-      const { error: logError } = await supabase.from('health_logs').insert({
+      // 3. Persist per-feature health logs + update feature scores
+      for (const fh of cycle.featureHealth) {
+        await supabase.from('feature_health_logs').insert({
+          feature_id: fh.feature_id,
+          project_id: project.id,
+          health_score: fh.health_score,
+          status: fh.status,
+          checks_run: fh.checks_run,
+          checks_passed: fh.checks_passed,
+        });
+        await supabase
+          .from('features')
+          .update({
+            health_score: fh.health_score,
+            status: fh.status,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', fh.feature_id);
+      }
+
+      // 4. Persist project-level health log + update project
+      const passedCount = cycle.results.filter((r) => r.status === 'passed').length;
+      await supabase.from('health_logs').insert({
         project_id: project.id,
-        health_score: runResult.health.score,
-        status: runResult.health.status,
-        tests_run: runResult.health.tests_run,
-        tests_passed: runResult.health.tests_passed,
+        health_score: cycle.projectHealth.health_score,
+        status: cycle.projectHealth.status,
+        tests_run: cycle.results.length,
+        tests_passed: passedCount,
       });
-      if (logError) console.error('Failed to save health log:', logError.message);
 
-      // Update project health
-      const { error: updateError } = await supabase
+      await supabase
         .from('projects')
         .update({
-          health_score: runResult.health.score,
-          status: runResult.health.status,
+          health_score: cycle.projectHealth.health_score,
+          status: cycle.projectHealth.status,
           updated_at: new Date().toISOString(),
         })
         .eq('id', project.id);
-      if (updateError) console.error('Failed to update project health:', updateError.message);
 
-      // Create alert if critical
-      if (runResult.health.status === 'critical') {
+      // 5. Create alert if critical
+      if (cycle.projectHealth.status === 'critical') {
         await supabase.from('alerts').insert({
           project_id: project.id,
           alert_type: 'health_critical',
-          message: `${project.project_name} health dropped to ${runResult.health.score}% — ${runResult.results.filter((r) => r.status === 'failed').length} test(s) failing`,
+          severity: 'critical',
+          message: `${project.project_name} health dropped to ${cycle.projectHealth.health_score}% — ${cycle.results.filter((r) => r.status === 'failed').length} check(s) failing`,
           status: 'active',
         });
       }
 
       console.log(
-        `[${project.project_name}] Done — score: ${runResult.health.score}%, status: ${runResult.health.status}, errors: ${runResult.runtimeErrors.length}`
+        `[${project.project_name}] Done — score ${cycle.projectHealth.health_score}%, status ${cycle.projectHealth.status}, ${cycle.featureHealth.length} feature(s) measured`
       );
     } catch (err) {
-      console.error(`[${project.project_name}] Monitor run failed:`, err);
+      console.error(`[${project.project_name}] Cycle failed:`, err);
     }
   }
 }

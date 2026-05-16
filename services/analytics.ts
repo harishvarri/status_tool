@@ -89,40 +89,92 @@ export async function getDashboardStats(userId: string): Promise<{
 }> {
   const supabase = await createClient();
 
-  const [projectsRes, errorsRes, resultsRes] = await Promise.all([
-    supabase.from('projects').select('health_score').eq('user_id', userId),
+  // Step 1: One query to get all user project IDs + health scores
+  const { data: projects } = await supabase
+    .from('projects')
+    .select('id, health_score')
+    .eq('user_id', userId);
+
+  const projectIds = (projects ?? []).map((p) => p.id);
+
+  if (projectIds.length === 0) {
+    return { totalProjects: 0, averageHealthScore: 0, activeErrors: 0, passingTests: 0 };
+  }
+
+  // Step 2: Two parallel queries using cached project IDs (no N+1)
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [errorsRes, resultsRes] = await Promise.all([
     supabase
       .from('runtime_errors')
       .select('id', { count: 'exact', head: true })
-      .in(
-        'project_id',
-        (await supabase.from('projects').select('id').eq('user_id', userId)).data?.map(
-          (p) => p.id
-        ) ?? []
-      ),
+      .in('project_id', projectIds),
     supabase
       .from('test_results')
-      .select('status')
+      .select('id', { count: 'exact', head: true })
       .eq('status', 'passed')
-      .in(
-        'project_id',
-        (await supabase.from('projects').select('id').eq('user_id', userId)).data?.map(
-          (p) => p.id
-        ) ?? []
-      )
-      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
+      .in('project_id', projectIds)
+      .gte('created_at', since24h),
   ]);
 
-  const projects = projectsRes.data ?? [];
   const avgScore =
-    projects.length > 0
-      ? Math.round(projects.reduce((a, p) => a + p.health_score, 0) / projects.length)
+    projects && projects.length > 0
+      ? Math.round(
+          projects.reduce((a, p) => a + (p.health_score ?? 0), 0) / projects.length
+        )
       : 0;
 
   return {
-    totalProjects: projects.length,
+    totalProjects: projects?.length ?? 0,
     averageHealthScore: avgScore,
     activeErrors: errorsRes.count ?? 0,
-    passingTests: resultsRes.data?.length ?? 0,
+    passingTests: resultsRes.count ?? 0,
+  };
+}
+
+/** Paginated project list — for dashboards with 50+ projects. */
+export async function getProjectsPaginated(
+  userId: string,
+  page = 0,
+  pageSize = 12
+): Promise<{
+  projects: Array<{
+    id: string;
+    project_name: string;
+    project_url: string;
+    description: string | null;
+    status: string;
+    health_score: number;
+    updated_at: string;
+  }>;
+  total: number;
+}> {
+  const supabase = await createClient();
+  const from = page * pageSize;
+  const to = from + pageSize - 1;
+
+  const [pageRes, countRes] = await Promise.all([
+    supabase
+      .from('projects')
+      .select('id, project_name, project_url, description, status, health_score, updated_at')
+      .eq('user_id', userId)
+      .order('updated_at', { ascending: false })
+      .range(from, to),
+    supabase
+      .from('projects')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId),
+  ]);
+
+  return {
+    projects: (pageRes.data ?? []) as Array<{
+      id: string;
+      project_name: string;
+      project_url: string;
+      description: string | null;
+      status: string;
+      health_score: number;
+      updated_at: string;
+    }>,
+    total: countRes.count ?? 0,
   };
 }

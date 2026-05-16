@@ -8,9 +8,10 @@ import { HealthTrendChart } from '@/components/charts/HealthTrendChart';
 import { ErrorFrequencyChart } from '@/components/charts/ErrorFrequencyChart';
 import { ResponseTimeChart } from '@/components/charts/ResponseTimeChart';
 import { Button } from '@/components/ui/button';
+import { FeatureCard } from '@/components/features/FeatureCard';
 import { ProjectActions } from '@/components/projects/ProjectActions';
 import Link from 'next/link';
-import { FlaskConical, AlertTriangle, ExternalLink } from 'lucide-react';
+import { FlaskConical, AlertTriangle, ExternalLink, Layers } from 'lucide-react';
 
 export default async function ProjectDetailPage({
   params,
@@ -28,8 +29,14 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound();
 
-  const [resultsRes, errorsRes, healthLogsRes, errorFreqRes, responseTimesRes] =
+  const [featuresRes, resultsRes, errorsRes, healthLogsRes, errorFreqRes, responseTimesRes] =
     await Promise.all([
+      supabase
+        .from('features')
+        .select('*')
+        .eq('project_id', id)
+        .order('weight', { ascending: false })
+        .order('created_at', { ascending: true }),
       supabase
         .from('test_results')
         .select('*, monitoring_tests(test_name)')
@@ -91,6 +98,12 @@ export default async function ProjectDetailPage({
             <ExternalLink className="w-3.5 h-3.5" />
             Visit
           </a>
+          <Link href={`/projects/${id}/features`}>
+            <Button variant="outline" size="sm">
+              <Layers className="w-4 h-4 mr-1.5" />
+              Features
+            </Button>
+          </Link>
           <Link href={`/projects/${id}/tests`}>
             <Button variant="outline" size="sm">
               <FlaskConical className="w-4 h-4 mr-1.5" />
@@ -117,6 +130,26 @@ export default async function ProjectDetailPage({
           </p>
         </div>
       </div>
+
+      {/* Features section */}
+      {featuresRes.data && featuresRes.data.length > 0 && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-foreground">Features</h2>
+            <Link
+              href={`/projects/${id}/features`}
+              className="text-xs text-primary hover:underline"
+            >
+              View all →
+            </Link>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {featuresRes.data.slice(0, 6).map((f, i) => (
+              <FeatureCard key={f.id} feature={f} projectId={id} index={i} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">

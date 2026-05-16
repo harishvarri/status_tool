@@ -12,15 +12,19 @@ export async function GET(
 
     const { id: projectId } = await params;
     const { data, error } = await supabase
-      .from('monitoring_tests')
+      .from('features')
       .select('*')
       .eq('project_id', projectId)
-      .order('created_at', { ascending: false });
+      .order('weight', { ascending: false })
+      .order('created_at', { ascending: true });
 
     if (error) throw error;
     return NextResponse.json(data ?? []);
   } catch (err: unknown) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Internal error' }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Internal error' },
+      { status: 500 }
+    );
   }
 }
 
@@ -35,47 +39,23 @@ export async function POST(
 
     const { id: projectId } = await params;
     const body = await request.json();
-    const {
-      test_name,
-      steps,
-      expected_result,
-      feature_id,
-      check_type,
-      http_config,
-    } = body;
+    const { name, slug, description, weight } = body;
 
-    if (!test_name || !expected_result) {
+    if (!name || !slug) {
       return NextResponse.json(
-        { error: 'test_name and expected_result are required' },
-        { status: 400 }
-      );
-    }
-
-    const finalCheckType = check_type === 'http' ? 'http' : 'browser';
-
-    if (finalCheckType === 'browser' && (!steps || !Array.isArray(steps) || steps.length === 0)) {
-      return NextResponse.json(
-        { error: 'browser checks require non-empty steps array' },
-        { status: 400 }
-      );
-    }
-    if (finalCheckType === 'http' && (!http_config || !http_config.url || !http_config.method)) {
-      return NextResponse.json(
-        { error: 'http checks require http_config with method and url' },
+        { error: 'name and slug are required' },
         { status: 400 }
       );
     }
 
     const { data, error } = await supabase
-      .from('monitoring_tests')
+      .from('features')
       .insert({
-        test_name,
-        steps: steps ?? [],
-        expected_result,
         project_id: projectId,
-        feature_id: feature_id ?? null,
-        check_type: finalCheckType,
-        http_config: finalCheckType === 'http' ? http_config : null,
+        name,
+        slug,
+        description: description ?? null,
+        weight: weight ?? 1,
       })
       .select()
       .single();
@@ -83,6 +63,9 @@ export async function POST(
     if (error) throw error;
     return NextResponse.json(data, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Internal error' }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Internal error' },
+      { status: 500 }
+    );
   }
 }

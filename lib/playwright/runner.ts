@@ -154,10 +154,13 @@ async function pingProjectUrl(
     results.push({
       test_id: 'default',
       project_id: projectId,
+      feature_id: null,
       status: pageErrors.filter((e) => e.severity === 'critical').length > 0 ? 'failed' : 'passed',
       error_message: null,
       screenshot_url: null,
       duration_ms: 0,
+      http_status_code: null,
+      response_size_bytes: null,
     });
   } catch (err) {
     const capture = await captureFullPage(
@@ -169,10 +172,13 @@ async function pingProjectUrl(
     results.push({
       test_id: 'default',
       project_id: projectId,
+      feature_id: null,
       status: 'failed',
       error_message: `Could not load application URL: ${err instanceof Error ? err.message : String(err)}`,
       screenshot_url: capture?.publicUrl ?? null,
       duration_ms: 0,
+      http_status_code: null,
+      response_size_bytes: null,
     });
   }
   allErrors.push(...pageErrors);
