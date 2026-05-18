@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { runChecks } from '../lib/checks/runner';
-import type { Feature, MonitoringTest } from '../types';
+import type { Feature, Severity } from '../types';
 
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error('SUPABASE_SERVICE_ROLE_KEY is required');
@@ -37,24 +37,60 @@ async function main() {
   console.log(`Running monitoring for ${projects.length} project(s)`);
 
   for (const project of projects) {
-    const [{ data: tests }, { data: features }] = await Promise.all([
+    const monitorStart = Date.now();
+
+    const [{ data: tests }, { data: features }, { data: recentErrors }] = await Promise.all([
       supabase.from('monitoring_tests').select('*').eq('project_id', project.id),
       supabase.from('features').select('*').eq('project_id', project.id),
+      // Fetch last 24 h of runtime errors for rolling health blend
+      supabase
+        .from('runtime_errors')
+        .select('severity, created_at')
+        .eq('project_id', project.id)
+        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: false }),
     ]);
 
-    const projectTests: MonitoringTest[] = (tests ?? []) as MonitoringTest[];
+    // Ensure a synthetic "Crawler Session" test exists so FK constraints are met
+    let crawlerTest = (tests ?? []).find((t) => t.test_name === 'Crawler Session');
+    if (!crawlerTest) {
+      const { data } = await supabase
+        .from('monitoring_tests')
+        .insert({
+          project_id: project.id,
+          test_name: 'Crawler Session',
+          steps: [],
+          expected_result: 'Crawl completes without errors',
+          status: 'passed',
+        })
+        .select()
+        .single();
+      crawlerTest = data;
+    }
+
     const projectFeatures: Feature[] = (features ?? []) as Feature[];
+    const dbErrors = (recentErrors ?? []) as Array<{ severity: string; created_at: string }>;
 
     console.log(
-      `[${project.project_name}] Features: ${projectFeatures.length} | Tests: ${projectTests.length} → against ${project.project_url}`
+      `[${project.project_name}] Features: ${projectFeatures.length}, ` +
+        `Recent 24h errors in DB: ${dbErrors.length} → crawling ${project.project_url}`
     );
 
     try {
       const cycle = await runChecks({
-        projectId: project.id,
-        projectUrl: project.project_url,
+        project,
         features: projectFeatures,
-        tests: projectTests,
+        recentDbErrors: dbErrors.map((e) => ({
+          severity: e.severity as Severity,
+          created_at: e.created_at,
+        })),
+      });
+
+      // Inject real test_id (FK) and actual duration into the synthetic results
+      const elapsed = Date.now() - monitorStart;
+      cycle.results.forEach((r) => {
+        r.test_id = crawlerTest!.id;
+        (r as any).duration_ms = elapsed;
       });
 
       // 1. Persist test results
@@ -63,7 +99,7 @@ async function main() {
         if (error) console.error('Failed to save test_results:', error.message);
       }
 
-      // 2. Persist runtime errors
+      // 2. Persist runtime errors (from current crawl only — don't re-insert history)
       if (cycle.errors.length > 0) {
         const errorInserts = cycle.errors.map((e) => ({
           project_id: e.project_id,
@@ -81,7 +117,7 @@ async function main() {
 
       // 3. Persist per-feature health logs + update feature scores
       for (const fh of cycle.featureHealth) {
-        await supabase.from('feature_health_logs').insert({
+        const { error: logError } = await supabase.from('feature_health_logs').insert({
           feature_id: fh.feature_id,
           project_id: project.id,
           health_score: fh.health_score,
@@ -89,6 +125,8 @@ async function main() {
           checks_run: fh.checks_run,
           checks_passed: fh.checks_passed,
         });
+        if (logError) console.error('Failed to save feature_health_log:', logError.message);
+
         await supabase
           .from('features')
           .update({
@@ -99,7 +137,7 @@ async function main() {
           .eq('id', fh.feature_id);
       }
 
-      // 4. Persist project-level health log + update project
+      // 4. Persist project-level health log + update project row
       const passedCount = cycle.results.filter((r) => r.status === 'passed').length;
       await supabase.from('health_logs').insert({
         project_id: project.id,
@@ -118,22 +156,47 @@ async function main() {
         })
         .eq('id', project.id);
 
-      // 5. Create alert if critical
+      // 5. Create alert if status is critical
       if (cycle.projectHealth.status === 'critical') {
         await supabase.from('alerts').insert({
           project_id: project.id,
           alert_type: 'health_critical',
           severity: 'critical',
-          message: `${project.project_name} health dropped to ${cycle.projectHealth.health_score}% — ${cycle.results.filter((r) => r.status === 'failed').length} check(s) failing`,
+          message:
+            `${project.project_name} health dropped to ${cycle.projectHealth.health_score}% — ` +
+            `${cycle.errors.length} issue(s) detected across the crawl`,
           status: 'active',
         });
       }
 
       console.log(
-        `[${project.project_name}] Done — score ${cycle.projectHealth.health_score}%, status ${cycle.projectHealth.status}, ${cycle.featureHealth.length} feature(s) measured`
+        `[${project.project_name}] ✓ Score: ${cycle.projectHealth.health_score}% ` +
+          `(${cycle.projectHealth.status}) | ` +
+          `Errors: ${cycle.errors.length} | ` +
+          `Features: ${cycle.featureHealth.length} | ` +
+          `Duration: ${Date.now() - monitorStart}ms`
       );
     } catch (err) {
       console.error(`[${project.project_name}] Cycle failed:`, err);
+
+      // Write a critical health log so the dashboard reflects the failure
+      // instead of silently showing a stale "100% healthy" from the last run.
+      try {
+        await supabase.from('health_logs').insert({
+          project_id: project.id,
+          health_score: 0,
+          status: 'critical',
+          tests_run: 0,
+          tests_passed: 0,
+        });
+        await supabase
+          .from('projects')
+          .update({ health_score: 0, status: 'critical', updated_at: new Date().toISOString() })
+          .eq('id', project.id);
+        console.log(`[${project.project_name}] Wrote critical health due to cycle failure`);
+      } catch (dbErr) {
+        console.error(`[${project.project_name}] Could not write failure health:`, dbErr);
+      }
     }
   }
 }
