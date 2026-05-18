@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { runChecks } from '../lib/checks/runner';
-import type { Feature, Severity } from '../types';
+import { executeHttpCheck } from '../lib/checks/http-check';
+import type { Feature, Severity, MonitoringTest } from '../types';
+import type { PersistableError } from '../lib/checks/runner';
 
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error('SUPABASE_SERVICE_ROLE_KEY is required');
@@ -14,6 +16,46 @@ const supabase = createClient(
     realtime: { params: { eventsPerSecond: 1 } },
   }
 );
+
+// ─── Severity weights (must match lib/health-engine/calculator.ts) ──────────
+const SEVERITY_WEIGHTS: Record<string, number> = { low: 1, medium: 3, high: 8, critical: 15 };
+
+function computeProjectHealth(
+  allErrors: PersistableError[],
+  recentDbErrors: Array<{ severity: string; created_at: string }>
+): { health_score: number; status: 'healthy' | 'warning' | 'critical' } {
+  // Deduplicate current errors
+  const seen = new Set<string>();
+  const unique = allErrors.filter((e) => {
+    const key = `${e.category}::${e.page_url}::${e.error_message.slice(0, 120)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Current crawl / checks score
+  const currentPenalty = unique.reduce(
+    (s, e) => s + (SEVERITY_WEIGHTS[e.severity] ?? SEVERITY_WEIGHTS.medium),
+    0
+  );
+  const currentScore = Math.max(0, Math.min(100, Math.round(100 - currentPenalty)));
+
+  // Rolling 24h history blend (60% current / 40% history)
+  let finalScore = currentScore;
+  if (recentDbErrors.length > 0) {
+    const histPenalty = recentDbErrors.reduce(
+      (s, e) => s + (SEVERITY_WEIGHTS[e.severity] ?? SEVERITY_WEIGHTS.medium),
+      0
+    );
+    const histScore = Math.max(0, Math.min(100, Math.round(100 - histPenalty)));
+    finalScore = Math.max(0, Math.min(100, Math.round(currentScore * 0.6 + histScore * 0.4)));
+  }
+
+  const status =
+    finalScore >= 90 ? 'healthy' : finalScore >= 70 ? 'warning' : 'critical';
+
+  return { health_score: finalScore, status };
+}
 
 async function main() {
   const targetProjectId = process.env.TARGET_PROJECT_ID;
@@ -42,7 +84,6 @@ async function main() {
     const [{ data: tests }, { data: features }, { data: recentErrors }] = await Promise.all([
       supabase.from('monitoring_tests').select('*').eq('project_id', project.id),
       supabase.from('features').select('*').eq('project_id', project.id),
-      // Fetch last 24 h of runtime errors for rolling health blend
       supabase
         .from('runtime_errors')
         .select('severity, created_at')
@@ -51,32 +92,60 @@ async function main() {
         .order('created_at', { ascending: false }),
     ]);
 
-    // Ensure a synthetic "Crawler Session" test exists so FK constraints are met
-    let crawlerTest = (tests ?? []).find((t) => t.test_name === 'Crawler Session');
-    if (!crawlerTest) {
-      const { data } = await supabase
-        .from('monitoring_tests')
-        .insert({
-          project_id: project.id,
-          test_name: 'Crawler Session',
-          steps: [],
-          expected_result: 'Crawl completes without errors',
-          status: 'passed',
-        })
-        .select()
-        .single();
-      crawlerTest = data;
-    }
-
     const projectFeatures: Feature[] = (features ?? []) as Feature[];
     const dbErrors = (recentErrors ?? []) as Array<{ severity: string; created_at: string }>;
+    const allTests: MonitoringTest[] = (tests ?? []) as MonitoringTest[];
+
+    // Split tests by check_type
+    const httpTests = allTests.filter((t) => t.check_type === 'http' && t.http_config);
+    const browserTests = allTests.filter((t) => t.check_type !== 'http');
 
     console.log(
-      `[${project.project_name}] Features: ${projectFeatures.length}, ` +
-        `Recent 24h errors in DB: ${dbErrors.length} → crawling ${project.project_url}`
+      `[${project.project_name}] ` +
+        `HTTP checks: ${httpTests.length}, ` +
+        `Browser/crawler: enabled, ` +
+        `24h errors in DB: ${dbErrors.length}`
     );
 
     try {
+      // ── 1. Run HTTP checks ─────────────────────────────────────────────────
+      const httpResults: Array<ReturnType<typeof executeHttpCheck> extends Promise<infer T> ? T : never> = [];
+      for (const test of httpTests) {
+        console.log(`  [HTTP] ${test.test_name} → ${test.http_config?.url}`);
+        const result = await executeHttpCheck(project.id, test);
+        httpResults.push(result);
+      }
+
+      const httpErrors: PersistableError[] = httpResults.flatMap((r) =>
+        r.errors.map((e) => ({
+          project_id: project.id,
+          feature_id: null,
+          error_message: e.message,
+          page_url: e.page_url,
+          functionality: 'api',
+          severity: e.severity,
+          category: e.category,
+          screenshot_url: null,
+        }))
+      );
+
+      // ── 2. Run auto-crawler ────────────────────────────────────────────────
+      let crawlerTest = allTests.find((t) => t.test_name === 'Crawler Session');
+      if (!crawlerTest) {
+        const { data } = await supabase
+          .from('monitoring_tests')
+          .insert({
+            project_id: project.id,
+            test_name: 'Crawler Session',
+            steps: [],
+            expected_result: 'Crawl completes without errors',
+            status: 'passed',
+          })
+          .select()
+          .single();
+        crawlerTest = data;
+      }
+
       const cycle = await runChecks({
         project,
         features: projectFeatures,
@@ -86,22 +155,33 @@ async function main() {
         })),
       });
 
-      // Inject real test_id (FK) and actual duration into the synthetic results
+      // Inject real test_id and actual duration
       const elapsed = Date.now() - monitorStart;
       cycle.results.forEach((r) => {
         r.test_id = crawlerTest!.id;
         (r as any).duration_ms = elapsed;
       });
 
-      // 1. Persist test results
-      if (cycle.results.length > 0) {
-        const { error } = await supabase.from('test_results').insert(cycle.results);
+      // ── 3. Combine errors from HTTP checks + crawler ───────────────────────
+      const allErrors: PersistableError[] = [...httpErrors, ...cycle.errors];
+
+      // ── 4. Re-compute project health with all errors combined ──────────────
+      const { health_score, status: projectStatus } = computeProjectHealth(allErrors, dbErrors);
+
+      // ── 5. Persist test results ────────────────────────────────────────────
+      const allResults = [
+        ...httpResults.map((r) => r.result),
+        ...cycle.results,
+      ];
+
+      if (allResults.length > 0) {
+        const { error } = await supabase.from('test_results').insert(allResults);
         if (error) console.error('Failed to save test_results:', error.message);
       }
 
-      // 2. Persist runtime errors (from current crawl only — don't re-insert history)
-      if (cycle.errors.length > 0) {
-        const errorInserts = cycle.errors.map((e) => ({
+      // ── 6. Persist runtime errors ─────────────────────────────────────────
+      if (allErrors.length > 0) {
+        const inserts = allErrors.map((e) => ({
           project_id: e.project_id,
           feature_id: e.feature_id,
           error_message: e.error_message,
@@ -111,13 +191,13 @@ async function main() {
           category: e.category,
           screenshot_url: e.screenshot_url ?? null,
         }));
-        const { error } = await supabase.from('runtime_errors').insert(errorInserts);
+        const { error } = await supabase.from('runtime_errors').insert(inserts);
         if (error) console.error('Failed to save runtime_errors:', error.message);
       }
 
-      // 3. Persist per-feature health logs + update feature scores
+      // ── 7. Persist per-feature health logs ────────────────────────────────
       for (const fh of cycle.featureHealth) {
-        const { error: logError } = await supabase.from('feature_health_logs').insert({
+        await supabase.from('feature_health_logs').insert({
           feature_id: fh.feature_id,
           project_id: project.id,
           health_score: fh.health_score,
@@ -125,8 +205,6 @@ async function main() {
           checks_run: fh.checks_run,
           checks_passed: fh.checks_passed,
         });
-        if (logError) console.error('Failed to save feature_health_log:', logError.message);
-
         await supabase
           .from('features')
           .update({
@@ -137,50 +215,49 @@ async function main() {
           .eq('id', fh.feature_id);
       }
 
-      // 4. Persist project-level health log + update project row
-      const passedCount = cycle.results.filter((r) => r.status === 'passed').length;
+      // ── 8. Persist project-level health log + update project ───────────────
+      const passedCount = allResults.filter((r) => r.status === 'passed').length;
       await supabase.from('health_logs').insert({
         project_id: project.id,
-        health_score: cycle.projectHealth.health_score,
-        status: cycle.projectHealth.status,
-        tests_run: cycle.results.length,
+        health_score,
+        status: projectStatus,
+        tests_run: allResults.length,
         tests_passed: passedCount,
       });
 
       await supabase
         .from('projects')
         .update({
-          health_score: cycle.projectHealth.health_score,
-          status: cycle.projectHealth.status,
+          health_score,
+          status: projectStatus,
           updated_at: new Date().toISOString(),
         })
         .eq('id', project.id);
 
-      // 5. Create alert if status is critical
-      if (cycle.projectHealth.status === 'critical') {
+      // ── 9. Create alert if critical ────────────────────────────────────────
+      if (projectStatus === 'critical') {
         await supabase.from('alerts').insert({
           project_id: project.id,
           alert_type: 'health_critical',
           severity: 'critical',
           message:
-            `${project.project_name} health dropped to ${cycle.projectHealth.health_score}% — ` +
-            `${cycle.errors.length} issue(s) detected across the crawl`,
+            `${project.project_name} health dropped to ${health_score}% — ` +
+            `${allErrors.length} issue(s) detected ` +
+            `(${httpErrors.length} HTTP, ${cycle.errors.length} crawler)`,
           status: 'active',
         });
       }
 
       console.log(
-        `[${project.project_name}] ✓ Score: ${cycle.projectHealth.health_score}% ` +
-          `(${cycle.projectHealth.status}) | ` +
-          `Errors: ${cycle.errors.length} | ` +
-          `Features: ${cycle.featureHealth.length} | ` +
+        `[${project.project_name}] ✓ Score: ${health_score}% (${projectStatus}) | ` +
+          `Errors: ${allErrors.length} (HTTP: ${httpErrors.length}, Crawler: ${cycle.errors.length}) | ` +
+          `Tests: ${passedCount}/${allResults.length} passed | ` +
           `Duration: ${Date.now() - monitorStart}ms`
       );
     } catch (err) {
       console.error(`[${project.project_name}] Cycle failed:`, err);
 
-      // Write a critical health log so the dashboard reflects the failure
-      // instead of silently showing a stale "100% healthy" from the last run.
+      // Write critical health so the dashboard shows the failure
       try {
         await supabase.from('health_logs').insert({
           project_id: project.id,
@@ -193,7 +270,6 @@ async function main() {
           .from('projects')
           .update({ health_score: 0, status: 'critical', updated_at: new Date().toISOString() })
           .eq('id', project.id);
-        console.log(`[${project.project_name}] Wrote critical health due to cycle failure`);
       } catch (dbErr) {
         console.error(`[${project.project_name}] Could not write failure health:`, dbErr);
       }
