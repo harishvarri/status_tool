@@ -86,16 +86,17 @@ export function ProjectCard({ project, errorCount = 0, index = 0 }: ProjectCardP
             <HealthScoreBadge score={project.health_score} status={project.status} size="sm" />
 
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <a
-                href={project.project_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.open(project.project_url, '_blank', 'noopener,noreferrer');
+                }}
                 className="flex items-center gap-1 hover:text-primary transition-colors truncate max-w-[60%]"
               >
                 <ExternalLink className="w-3 h-3 shrink-0" />
                 <span className="truncate">{project.project_url.replace(/^https?:\/\//, '')}</span>
-              </a>
+              </button>
 
               {errorCount > 0 && (
                 <span className="flex items-center gap-1 text-red-400">

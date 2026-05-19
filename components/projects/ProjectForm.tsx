@@ -17,6 +17,9 @@ const schema = z.object({
   project_name: z.string().min(2, 'Name must be at least 2 characters'),
   project_url: z.string().url('Enter a valid URL (https://...)'),
   description: z.string().optional(),
+  auth_login_url: z.string().url('Enter a valid URL').optional().or(z.literal('')),
+  auth_username: z.string().optional(),
+  auth_password: z.string().optional(),
 });
 type FormData = z.infer<typeof schema>;
 
@@ -105,6 +108,42 @@ export function ProjectForm({ initialData, projectId }: ProjectFormProps) {
               rows={2}
               {...register('description')}
             />
+          </div>
+
+          <div className="space-y-4 pt-4 border-t border-border">
+            <h4 className="text-sm font-medium">Auto-Crawler Credentials (Optional)</h4>
+            <div className="space-y-1.5">
+              <Label htmlFor="auth_login_url">Login URL</Label>
+              <Input
+                id="auth_login_url"
+                type="url"
+                placeholder="https://myapp.com/login"
+                {...register('auth_login_url')}
+              />
+              {errors.auth_login_url && (
+                <p className="text-xs text-destructive">{errors.auth_login_url.message}</p>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="auth_username">Username / Email</Label>
+                <Input
+                  id="auth_username"
+                  type="text"
+                  placeholder="admin@example.com"
+                  {...register('auth_username')}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="auth_password">Password</Label>
+                <Input
+                  id="auth_password"
+                  type="password"
+                  placeholder="••••••••"
+                  {...register('auth_password')}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="flex gap-3 pt-2">

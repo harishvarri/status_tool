@@ -8,7 +8,7 @@ export async function POST(request: NextRequest) {
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const body = await request.json();
-    const { project_name, project_url, description } = body;
+    const { project_name, project_url, description, auth_login_url, auth_username, auth_password } = body;
 
     if (!project_name || !project_url) {
       return NextResponse.json({ error: 'project_name and project_url are required' }, { status: 400 });
@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
 
     const { data, error } = await supabase
       .from('projects')
-      .insert({ project_name, project_url, description, user_id: user.id })
+      .insert({ project_name, project_url, description, auth_login_url, auth_username, auth_password, user_id: user.id })
       .select()
       .single();
 
