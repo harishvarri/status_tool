@@ -101,10 +101,13 @@ async function main() {
     const httpTests = allTests.filter((t) => t.check_type === 'http' && t.http_config);
     const browserTests = allTests.filter((t) => t.check_type !== 'http');
 
+    // Projects with only HTTP checks skip the Playwright crawler entirely
+    const httpOnly = httpTests.length > 0 && browserTests.length === 0;
+
     console.log(
       `[${project.project_name}] ` +
         `HTTP checks: ${httpTests.length}, ` +
-        `Browser/crawler: enabled, ` +
+        `Browser/crawler: ${httpOnly ? 'disabled (http-only project)' : 'enabled'}, ` +
         `24h errors in DB: ${dbErrors.length}`
     );
 
@@ -158,41 +161,64 @@ async function main() {
         }))
       );
 
-      // ── 2. Run auto-crawler ────────────────────────────────────────────────
-      let crawlerTest = allTests.find((t) => t.test_name === 'Crawler Session');
-      if (!crawlerTest) {
-        const { data } = await supabase
-          .from('monitoring_tests')
-          .insert({
-            project_id: project.id,
-            test_name: 'Crawler Session',
-            steps: [],
-            expected_result: 'Crawl completes without errors',
-            status: 'passed',
-          })
-          .select()
-          .single();
-        crawlerTest = data;
+      // ── 2. Run auto-crawler (skipped for http-only projects) ──────────────
+      let crawlerErrors: PersistableError[] = [];
+      let crawlerResults: typeof httpResults[0]['result'][] = [];
+
+      if (!httpOnly) {
+        let crawlerTest = allTests.find((t) => t.test_name === 'Crawler Session');
+        if (!crawlerTest) {
+          const { data } = await supabase
+            .from('monitoring_tests')
+            .insert({
+              project_id: project.id,
+              test_name: 'Crawler Session',
+              steps: [],
+              expected_result: 'Crawl completes without errors',
+              status: 'passed',
+            })
+            .select()
+            .single();
+          crawlerTest = data;
+        }
+
+        const cycle = await runChecks({
+          project,
+          features: projectFeatures,
+          recentDbErrors: dbErrors.map((e) => ({
+            severity: e.severity as Severity,
+            created_at: e.created_at,
+          })),
+        });
+
+        const elapsed = Date.now() - monitorStart;
+        cycle.results.forEach((r) => {
+          r.test_id = crawlerTest!.id;
+          (r as any).duration_ms = elapsed;
+        });
+
+        crawlerErrors  = cycle.errors;
+        crawlerResults = cycle.results;
+
+        // Persist per-feature health logs from crawler
+        for (const fh of cycle.featureHealth) {
+          await supabase.from('feature_health_logs').insert({
+            feature_id:   fh.feature_id,
+            project_id:   project.id,
+            health_score: fh.health_score,
+            status:       fh.status,
+            checks_run:   fh.checks_run,
+            checks_passed: fh.checks_passed,
+          });
+          await supabase
+            .from('features')
+            .update({ health_score: fh.health_score, status: fh.status, updated_at: new Date().toISOString() })
+            .eq('id', fh.feature_id);
+        }
       }
 
-      const cycle = await runChecks({
-        project,
-        features: projectFeatures,
-        recentDbErrors: dbErrors.map((e) => ({
-          severity: e.severity as Severity,
-          created_at: e.created_at,
-        })),
-      });
-
-      // Inject real test_id and actual duration
-      const elapsed = Date.now() - monitorStart;
-      cycle.results.forEach((r) => {
-        r.test_id = crawlerTest!.id;
-        (r as any).duration_ms = elapsed;
-      });
-
-      // ── 3. Combine errors from HTTP checks + crawler ───────────────────────
-      const allErrors: PersistableError[] = [...httpErrors, ...cycle.errors];
+      // ── 3. Combine errors ─────────────────────────────────────────────────
+      const allErrors: PersistableError[] = [...httpErrors, ...crawlerErrors];
 
       // ── 4. Re-compute project health with all errors combined ──────────────
       const { health_score, status: projectStatus } = computeProjectHealth(allErrors, dbErrors);
@@ -200,7 +226,7 @@ async function main() {
       // ── 5. Persist test results ────────────────────────────────────────────
       const allResults = [
         ...httpResults.map((r) => r.result),
-        ...cycle.results,
+        ...crawlerResults,
       ];
 
       if (allResults.length > 0) {
@@ -224,27 +250,7 @@ async function main() {
         if (error) console.error('Failed to save runtime_errors:', error.message);
       }
 
-      // ── 7. Persist per-feature health logs ────────────────────────────────
-      for (const fh of cycle.featureHealth) {
-        await supabase.from('feature_health_logs').insert({
-          feature_id: fh.feature_id,
-          project_id: project.id,
-          health_score: fh.health_score,
-          status: fh.status,
-          checks_run: fh.checks_run,
-          checks_passed: fh.checks_passed,
-        });
-        await supabase
-          .from('features')
-          .update({
-            health_score: fh.health_score,
-            status: fh.status,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', fh.feature_id);
-      }
-
-      // ── 8. Persist project-level health log + update project ───────────────
+      // ── 7. Persist project-level health log + update project ───────────────
       const passedCount = allResults.filter((r) => r.status === 'passed').length;
       await supabase.from('health_logs').insert({
         project_id: project.id,
@@ -272,14 +278,14 @@ async function main() {
           message:
             `${project.project_name} health dropped to ${health_score}% — ` +
             `${allErrors.length} issue(s) detected ` +
-            `(${httpErrors.length} HTTP, ${cycle.errors.length} crawler)`,
+            `(${httpErrors.length} HTTP, ${crawlerErrors.length} crawler)`,
           status: 'active',
         });
       }
 
       console.log(
         `[${project.project_name}] ✓ Score: ${health_score}% (${projectStatus}) | ` +
-          `Errors: ${allErrors.length} (HTTP: ${httpErrors.length}, Crawler: ${cycle.errors.length}) | ` +
+          `Errors: ${allErrors.length} (HTTP: ${httpErrors.length}, Crawler: ${crawlerErrors.length}) | ` +
           `Tests: ${passedCount}/${allResults.length} passed | ` +
           `Duration: ${Date.now() - monitorStart}ms`
       );
