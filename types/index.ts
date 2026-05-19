@@ -21,6 +21,9 @@ export interface Project {
   description: string | null;
   status: ProjectStatus;
   health_score: number;
+  auth_login_url?: string | null;
+  auth_username?: string | null;
+  auth_password?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -141,6 +144,9 @@ export interface CreateProjectInput {
   project_name: string;
   project_url: string;
   description?: string;
+  auth_login_url?: string;
+  auth_username?: string;
+  auth_password?: string;
 }
 
 export interface CreateTestInput {
@@ -182,6 +188,25 @@ export interface BugTrendPoint {
   date: string;
   category: BugCategory;
   count: number;
+}
+
+export interface HealthSnapshot {
+  id: string;
+  project_id: string;
+  test_id: string | null;
+  overall_status: 'healthy' | 'degraded' | 'critical' | 'unknown';
+  service_name: string | null;
+  version: string | null;
+  environment: string | null;
+  response_time_ms: number | null;
+  uptime_seconds: number | null;
+  memory_percent: number | null;
+  checks_total: number;
+  checks_passed: number;
+  checks_failed: number;
+  checks_warning: number;
+  snapshot: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface UptimeSummary {

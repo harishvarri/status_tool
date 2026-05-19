@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { runChecks } from '../lib/checks/runner';
 import { executeHttpCheck } from '../lib/checks/http-check';
+import { scoreFromSnapshot } from '../lib/checks/health-endpoint-parser';
 import type { Feature, Severity, MonitoringTest } from '../types';
 import type { PersistableError } from '../lib/checks/runner';
 
@@ -109,11 +110,39 @@ async function main() {
 
     try {
       // ── 1. Run HTTP checks ─────────────────────────────────────────────────
-      const httpResults: Array<ReturnType<typeof executeHttpCheck> extends Promise<infer T> ? T : never> = [];
+      type HttpResult = Awaited<ReturnType<typeof executeHttpCheck>>;
+      const httpResults: HttpResult[] = [];
       for (const test of httpTests) {
         console.log(`  [HTTP] ${test.test_name} → ${test.http_config?.url}`);
         const result = await executeHttpCheck(project.id, test);
         httpResults.push(result);
+      }
+
+      // ── 1a. Persist health snapshots ───────────────────────────────────────
+      for (let i = 0; i < httpResults.length; i++) {
+        const r    = httpResults[i];
+        const test = httpTests[i];
+        if (!r.healthSnapshot?.isHealthEndpoint) continue;
+
+        const snap = r.healthSnapshot;
+        const { error: snapErr } = await supabase.from('health_snapshots').insert({
+          project_id:       project.id,
+          test_id:          test.id,
+          overall_status:   snap.overallStatus,
+          service_name:     snap.service ?? null,
+          version:          snap.version ?? null,
+          environment:      snap.environment ?? null,
+          response_time_ms: snap.responseTimeMs ?? null,
+          uptime_seconds:   snap.uptimeSeconds ?? null,
+          memory_percent:   snap.memoryPercent ?? null,
+          checks_total:     snap.checksTotal,
+          checks_passed:    snap.checksPassed,
+          checks_failed:    snap.checksFailed,
+          checks_warning:   snap.checksWarning,
+          snapshot:         snap.rawSnapshot,
+        });
+        if (snapErr) console.error(`  Failed to save health_snapshot for ${test.test_name}:`, snapErr.message);
+        else console.log(`  [Health] snapshot saved — ${snap.overallStatus} (${snap.checksPassed}/${snap.checksTotal} checks ok, score=${scoreFromSnapshot(snap)})`);
       }
 
       const httpErrors: PersistableError[] = httpResults.flatMap((r) =>

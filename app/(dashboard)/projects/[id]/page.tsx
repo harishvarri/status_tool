@@ -2,6 +2,7 @@ import { notFound } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { HealthScoreBadge } from '@/components/dashboard/HealthScoreBadge';
+import { HealthCheckBreakdown } from '@/components/dashboard/HealthCheckBreakdown';
 import { TestResultsList } from '@/components/projects/TestResultsList';
 import { ErrorFeed } from '@/components/dashboard/ErrorFeed';
 import { HealthTrendChart } from '@/components/charts/HealthTrendChart';
@@ -11,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { FeatureCard } from '@/components/features/FeatureCard';
 import { ProjectActions } from '@/components/projects/ProjectActions';
 import Link from 'next/link';
-import { FlaskConical, AlertTriangle, ExternalLink, Layers } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Layers } from 'lucide-react';
 
 export default async function ProjectDetailPage({
   params,
@@ -29,7 +30,7 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound();
 
-  const [featuresRes, resultsRes, errorsRes, healthLogsRes, errorFreqRes, responseTimesRes] =
+  const [featuresRes, resultsRes, errorsRes, healthLogsRes, errorFreqRes, responseTimesRes, httpTestsRes] =
     await Promise.all([
       supabase
         .from('features')
@@ -66,7 +67,17 @@ export default async function ProjectDetailPage({
         .eq('project_id', id)
         .order('created_at', { ascending: false })
         .limit(30),
+      // Check if this project has HTTP health checks configured
+      supabase
+        .from('monitoring_tests')
+        .select('id')
+        .eq('project_id', id)
+        .eq('check_type', 'http')
+        .limit(1),
     ]);
+
+  // Does this project have any HTTP health checks?
+  const hasHealthEndpoint = (httpTestsRes.data?.length ?? 0) > 0;
 
   // Build error frequency data
   const errorFreqMap: Record<string, number> = {};
@@ -104,12 +115,6 @@ export default async function ProjectDetailPage({
               Features
             </Button>
           </Link>
-          <Link href={`/projects/${id}/tests`}>
-            <Button variant="outline" size="sm">
-              <FlaskConical className="w-4 h-4 mr-1.5" />
-              Tests
-            </Button>
-          </Link>
           <Link href={`/projects/${id}/errors`}>
             <Button variant="outline" size="sm">
               <AlertTriangle className="w-4 h-4 mr-1.5" />
@@ -130,6 +135,14 @@ export default async function ProjectDetailPage({
           </p>
         </div>
       </div>
+
+      {/* Health endpoint breakdown — shown when project has HTTP checks */}
+      {hasHealthEndpoint && (
+        <div className="mb-6">
+          <h2 className="text-sm font-medium text-foreground mb-3">Health Endpoint</h2>
+          <HealthCheckBreakdown projectId={id} />
+        </div>
+      )}
 
       {/* Features section */}
       {featuresRes.data && featuresRes.data.length > 0 && (
