@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { FeatureCard } from '@/components/features/FeatureCard';
 import { ProjectActions } from '@/components/projects/ProjectActions';
 import Link from 'next/link';
-import { AlertTriangle, ExternalLink, Layers } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Layers, Activity } from 'lucide-react';
 
 export default async function ProjectDetailPage({
   params,
@@ -119,6 +119,12 @@ export default async function ProjectDetailPage({
             <Button variant="outline" size="sm">
               <AlertTriangle className="w-4 h-4 mr-1.5" />
               Errors
+            </Button>
+          </Link>
+          <Link href={`/projects/${id}/health`}>
+            <Button variant="outline" size="sm">
+              <Activity className="w-4 h-4 mr-1.5" />
+              Health Analytics
             </Button>
           </Link>
           <ProjectActions projectId={id} projectName={project.project_name} />
